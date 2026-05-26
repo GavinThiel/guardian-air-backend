@@ -1,4 +1,10 @@
-// 7/2 7/2 7/3 roster pattern: 28-day cycle, 21 duty / 7 off (75% utilisation)
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Content-Type': 'application/json',
+};
+
+// 7/2 7/2 7/3 pattern: 28-day cycle, 21 duty / 7 off (75% utilisation)
 const PATTERN = [
   { status: 'DUTY', days: 7 },
   { status: 'OFF',  days: 2 },
@@ -10,7 +16,6 @@ const PATTERN = [
 
 const CYCLE_LENGTH = 28;
 
-// Pre-built lookup: position in cycle → status
 const CYCLE_MAP = (() => {
   const map = new Array(CYCLE_LENGTH);
   let pos = 0;
@@ -25,83 +30,59 @@ function statusOnDay(cycleOffset, dayIndex) {
   return CYCLE_MAP[pos];
 }
 
-function isoToDate(str) {
-  const d = new Date(str + 'T00:00:00Z');
-  if (isNaN(d)) throw new Error(`Invalid date: ${str}`);
-  return d;
+function toISO(date) {
+  return date.toISOString().slice(0, 10);
 }
 
 function addDays(date, n) {
   return new Date(date.getTime() + n * 86400000);
 }
 
-function toISO(date) {
-  return date.toISOString().slice(0, 10);
-}
-
-// Assign each crew member a group and derive their cycle offset.
-// Groups are spread evenly through the 28-day cycle so coverage is continuous.
 function buildCrew(names, groups) {
   return names.map((name, i) => {
     const group = i % groups;
-    // Spread groups evenly: group g starts at floor(g * 28 / groups)
     const cycleOffset = Math.floor((group * CYCLE_LENGTH) / groups);
     return { name, group, cycleOffset };
   });
 }
 
-function generateNames(count) {
-  return Array.from({ length: count }, (_, i) => `Crew ${i + 1}`);
+export async function onRequestOptions() {
+  return new Response(null, { status: 200, headers: CORS });
 }
 
-export default function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Content-Type', 'application/json');
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+export async function onRequestGet({ request }) {
+  const { searchParams } = new URL(request.url);
 
   try {
-    const {
-      startDate = toISO(new Date()),
-      days: daysParam = '28',
-      crewCount: countParam,
-      crew: crewParam,
-      groups: groupsParam = '4',
-    } = req.query;
+    const startDate = searchParams.get('startDate') || toISO(new Date());
+    const days = Math.min(Math.max(parseInt(searchParams.get('days') || '28', 10), 1), 365);
+    const groups = Math.min(Math.max(parseInt(searchParams.get('groups') || '4', 10), 1), 28);
 
-    // Parse & validate
-    const start = isoToDate(startDate);
-    const days = Math.min(Math.max(parseInt(daysParam, 10) || 28, 1), 365);
-    const groups = Math.min(Math.max(parseInt(groupsParam, 10) || 4, 1), 28);
+    const start = new Date(startDate + 'T00:00:00Z');
+    if (isNaN(start)) throw new Error(`Invalid startDate: ${startDate}`);
 
     let names;
+    const crewParam = searchParams.get('crew');
     if (crewParam) {
       names = crewParam.split(',').map(n => n.trim()).filter(Boolean);
     } else {
-      const count = Math.min(Math.max(parseInt(countParam, 10) || 20, 1), 10000);
-      names = generateNames(count);
+      const count = Math.min(Math.max(parseInt(searchParams.get('crewCount') || '20', 10), 1), 10000);
+      names = Array.from({ length: count }, (_, i) => `Crew ${i + 1}`);
     }
 
     const crew = buildCrew(names, groups);
 
-    // Build per-day summary
     const dailySchedule = [];
     for (let d = 0; d < days; d++) {
       const date = toISO(addDays(start, d));
       const onDuty = [];
       const offDuty = [];
       for (const member of crew) {
-        if (statusOnDay(member.cycleOffset, d) === 'DUTY') {
-          onDuty.push(member.name);
-        } else {
-          offDuty.push(member.name);
-        }
+        (statusOnDay(member.cycleOffset, d) === 'DUTY' ? onDuty : offDuty).push(member.name);
       }
       dailySchedule.push({ date, onDuty, offDuty, totalOnDuty: onDuty.length, totalOffDuty: offDuty.length });
     }
 
-    // Build per-crew schedule
     const crewSchedules = {};
     for (const member of crew) {
       crewSchedules[member.name] = {
@@ -114,7 +95,7 @@ export default function handler(req, res) {
       };
     }
 
-    res.status(200).json({
+    const body = JSON.stringify({
       meta: {
         pattern: '7/2 7/2 7/3',
         cycleLength: CYCLE_LENGTH,
@@ -133,7 +114,9 @@ export default function handler(req, res) {
       dailySchedule,
       crewSchedules,
     });
+
+    return new Response(body, { status: 200, headers: CORS });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    return new Response(JSON.stringify({ error: err.message }), { status: 400, headers: CORS });
   }
 }
